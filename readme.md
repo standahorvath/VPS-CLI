@@ -12,9 +12,10 @@ K dispozici je také Docker Compose konfigurace pro ty, kteří si chtějí cel�
 .
 ├── Dockerfile              # Ubuntu 22.04 + základní nástroje
 ├── docker-compose.yml      # Definice služby a volume mount
+├── install.sh              # Jednořádková instalace (stáhne repozitář a spustí start.sh)
 ├── start.sh                # Hlavní spouštěcí skript s výběrem dalších skriptů
-├── server-init.sh          # Ukázkový skript
-└── run-container.sh        # Ukázkový skript
+├── server-init.sh          # Inicializace serveru (firewall, SSH port, Docker, Traefik, Portainer, swap)
+└── run-container.sh        # Spuštění kontejneru za Traefikem s HTTPS
 ```
 
 ---
@@ -26,7 +27,25 @@ K dispozici je také Docker Compose konfigurace pro ty, kteří si chtějí cel�
 
 ---
 
-## 🚀 Nasazení na VPS (např. DigitalOcean)
+## ⚡ Rychlý start (jeden příkaz)
+
+Na čerstvém Ubuntu serveru stačí spustit:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/standahorvath/VPS-CLI/main/install.sh | sudo bash
+```
+
+Skript stáhne (nebo aktualizuje) repozitář do `/opt/vps-cli` a spustí `start.sh`. Při dalším spuštění stejného příkazu se repozitář jen aktualizuje.
+
+Volitelně lze změnit větev nebo cílový adresář:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/standahorvath/VPS-CLI/main/install.sh | sudo VPS_CLI_BRANCH=main VPS_CLI_DIR=/opt/vps-cli bash
+```
+
+---
+
+## 🚀 Nasazení na VPS ručně (např. DigitalOcean)
 
 1. Přihlas se na svůj VPS:
 
@@ -37,8 +56,8 @@ ssh root@moje-server-ip
 2. Naklonuj repozitář:
 
 ```bash
-git clone https://github.com/tvoje-username/ubuntu-dev-docker.git
-cd ubuntu-dev-docker
+git clone https://github.com/standahorvath/VPS-CLI.git
+cd VPS-CLI
 ```
 
 3. Spusť úvodní skript:
@@ -48,6 +67,10 @@ bash start.sh
 ```
 
 Ten ti umožní zvolit další akce nebo skripty jako `server-init.sh`, `run-container.sh` apod.
+
+> ⚠️ Pokud v `server-init.sh` zvolíš jiný SSH port než 22, skript ho nastaví v SSH i ve firewallu. Před odhlášením si v novém okně ověř, že se připojíš: `ssh -p <port> root@moje-server-ip`.
+
+> ℹ️ Pro HTTPS musí DNS záznamy domén (Portainer i aplikací) mířit na IP serveru — certifikáty vydává Let's Encrypt přes Traefik automaticky. HTTP se automaticky přesměrovává na HTTPS.
 
 ---
 
@@ -70,6 +93,8 @@ docker-compose run ubuntu-env
 ```bash
 bash start.sh
 ```
+
+> ℹ️ V kontejneru nefunguje `systemd` (`systemctl`, `hostnamectl`), takže `server-init.sh` tam celý neproběhne. Docker prostředí je vhodné hlavně pro úpravy menu a skriptů; `server-init.sh` testuj na čistém VPS.
 
 Nebo uprav `docker-compose.yml` a spusť automaticky `start.sh`:
 
