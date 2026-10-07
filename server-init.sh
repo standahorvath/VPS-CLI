@@ -12,6 +12,9 @@ fi
 
 set -euo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
 # =========================================================
 # 0. KONFIGURAČNÍ PROMĚNNÉ
 # =========================================================
@@ -21,10 +24,22 @@ DEFAULT_SSH_PORT=22
 DEFAULT_TIMEZONE="Europe/Prague"
 DEFAULT_SWAP_SIZE="2G"
 
-read -p "Zadej SSH port [$DEFAULT_SSH_PORT]: " SSH_PORT
-SSH_PORT=${SSH_PORT:-$DEFAULT_SSH_PORT}
+while true; do
+  read -p "Zadej SSH port [$DEFAULT_SSH_PORT]: " SSH_PORT
+  SSH_PORT=${SSH_PORT:-$DEFAULT_SSH_PORT}
+  if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && (( SSH_PORT >= 1 && SSH_PORT <= 65535 )); then
+    break
+  fi
+  echo "Neplatny port (1-65535)."
+done
 
-read -p "Zadej hostname (napr. vps.example.com): " NEW_HOSTNAME
+while true; do
+  read -p "Zadej hostname (napr. vps.example.com): " NEW_HOSTNAME
+  if [[ "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+    break
+  fi
+  echo "Neplatny hostname."
+done
 
 read -p "Zadej casovou zonu [$DEFAULT_TIMEZONE]: " TIMEZONE
 TIMEZONE=${TIMEZONE:-$DEFAULT_TIMEZONE}
@@ -41,8 +56,14 @@ if [[ -z "$PORTAINER_DOMAIN" ]]; then
   exit 1
 fi
 
-read -p "Zadej velikost swap prostoru [$DEFAULT_SWAP_SIZE]: " INPUT_SWAP_SIZE
-SWAP_SIZE=${INPUT_SWAP_SIZE:-$DEFAULT_SWAP_SIZE}
+while true; do
+  read -p "Zadej velikost swap prostoru (napr. 2G, 512M) [$DEFAULT_SWAP_SIZE]: " INPUT_SWAP_SIZE
+  SWAP_SIZE=${INPUT_SWAP_SIZE:-$DEFAULT_SWAP_SIZE}
+  if [[ "$SWAP_SIZE" =~ ^[0-9]+[GM]$ ]]; then
+    break
+  fi
+  echo "Neplatna velikost, pouzij format napr. 2G nebo 512M."
+done
 
 read -p "Povolit HTTP/HTTPS porty? (y/n) [y]: " ALLOW_HTTP
 ALLOW_HTTP=${ALLOW_HTTP:-y}
@@ -58,8 +79,8 @@ fi
 # =========================================================
 
 TRAEFIK_CONFIG_PATH="/srv/docker/traefik/traefik.yml"
-ACME_JSON_PATH="/srv/docker/traefik/acme.json"
 TRAEFIK_LE_PATH="/srv/docker/traefik/letsencrypt"
+ACME_JSON_PATH="$TRAEFIK_LE_PATH/acme.json"
 PORTAINER_DATA_PATH="/srv/data/portainer"
 PROJECTS_ROOT="/srv/projects"
 DATA_ROOT="/srv/data"
@@ -67,7 +88,7 @@ BACKUP_ROOT="/srv/backups"
 SCRIPTS_ROOT="/srv/scripts"
 SHARED_DOCKER_PATH="/srv/docker/shared"
 
-SSH_CONFIG="/etc/ssh/sshd_config"
+SSH_PORT_CONFIG="/etc/ssh/sshd_config.d/00-vps-cli-port.conf"
 FAIL2BAN_CONFIG="/etc/fail2ban/jail.local"
 UNATTENDED_UPGRADES="/etc/apt/apt.conf.d/20auto-upgrades"
 DOCKER_LOGROTATE="/etc/logrotate.d/docker"
@@ -77,10 +98,13 @@ DOCKER_LOGROTATE="/etc/logrotate.d/docker"
 # =========================================================
 
 hostnamectl set-hostname "$NEW_HOSTNAME"
+if ! grep -qE "^127\.0\.1\.1[[:space:]]+$NEW_HOSTNAME([[:space:]]|$)" /etc/hosts; then
+    echo "127.0.1.1 $NEW_HOSTNAME" >> /etc/hosts
+fi
 echo "Hostname nastaven na: $NEW_HOSTNAME"
 
-apt update && apt upgrade -y
-apt install -y curl wget git vim nano htop ncdu zip unzip ufw fail2ban
+apt-get update && apt-get upgrade "${APT_OPTS[@]}"
+apt-get install "${APT_OPTS[@]}" curl wget git vim nano htop ncdu zip unzip ufw fail2ban
 
 if command -v timedatectl &> /dev/null; then
     timedatectl set-timezone "$TIMEZONE"
@@ -93,12 +117,12 @@ fi
 
 echo "Casova zona nastavena na: $CURRENT_TIMEZONE"
 
-apt install -y locales
+apt-get install "${APT_OPTS[@]}" locales
 locale-gen en_US.UTF-8
 locale-gen cs_CZ.UTF-8
 update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-apt install -y chrony
+apt-get install "${APT_OPTS[@]}" chrony
 systemctl enable chrony
 systemctl start chrony
 
@@ -106,9 +130,27 @@ systemctl start chrony
 # 2. ZABEZPEČENÍ SERVERU
 # =========================================================
 
+# Nastaveni SSH portu (drop-in ma prednost pred hlavnim sshd_config).
+# Musi probehnout pred zapnutim firewallu, jinak hrozi zamceni mimo server.
+mkdir -p /etc/ssh/sshd_config.d /run/sshd
+echo "Port $SSH_PORT" > "$SSH_PORT_CONFIG"
+if ! sshd -t; then
+    rm -f "$SSH_PORT_CONFIG"
+    echo "Neplatna SSH konfigurace, port nebyl zmenen. Ukoncuji."
+    exit 1
+fi
+if systemctl is-enabled ssh.socket &>/dev/null; then
+    # Ubuntu 22.10+ pouziva socket activation, port se bere ze sshd_config pres generator
+    systemctl daemon-reload
+    systemctl restart ssh.socket
+else
+    systemctl restart ssh
+fi
+echo "SSH nasloucha na portu: $SSH_PORT"
+
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow $SSH_PORT/tcp
+ufw allow "$SSH_PORT"/tcp
 
 if [[ "$ALLOW_HTTP" == "y" ]]; then
     ufw allow http
@@ -134,7 +176,7 @@ EOF
 systemctl enable fail2ban
 systemctl restart fail2ban
 
-apt install -y unattended-upgrades apt-listchanges
+apt-get install "${APT_OPTS[@]}" unattended-upgrades apt-listchanges
 cat > "$UNATTENDED_UPGRADES" << EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -147,14 +189,14 @@ systemctl restart unattended-upgrades
 # 3. INSTALACE DOCKERU A KONFIGURACE
 # =========================================================
 
-apt install -y apt-transport-https ca-certificates gnupg lsb-release
+apt-get install "${APT_OPTS[@]}" apt-transport-https ca-certificates gnupg lsb-release
 mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
 
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
 
-apt update
-apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose
+apt-get update
+apt-get install "${APT_OPTS[@]}" docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable docker
 systemctl start docker
 
@@ -164,8 +206,8 @@ systemctl start docker
 
 if ! id "$DEFAULT_OWNER" &>/dev/null; then
     useradd -m -s /bin/bash "$DEFAULT_OWNER"
-    usermod -aG docker "$DEFAULT_OWNER"
 fi
+usermod -aG docker "$DEFAULT_OWNER"
 
 if [[ "$SETUP_SSH_KEY" == "y" ]]; then
     mkdir -p "/home/$DEFAULT_OWNER/.ssh"
@@ -179,14 +221,19 @@ fi
 # 5. STRUKTURA A TRAEFIK
 # =========================================================
 
-mkdir -p /srv/docker/{traefik,portainer,shared}
-mkdir -p "$PROJECTS_ROOT" "$DATA_ROOT" "$BACKUP_ROOT" "$SCRIPTS_ROOT" "$TRAEFIK_LE_PATH"
+mkdir -p /srv/docker/{traefik,portainer} "$SHARED_DOCKER_PATH"
+mkdir -p "$PROJECTS_ROOT" "$DATA_ROOT" "$BACKUP_ROOT" "$SCRIPTS_ROOT" "$TRAEFIK_LE_PATH" "$PORTAINER_DATA_PATH"
 touch "$ACME_JSON_PATH"
 
 cat > "$TRAEFIK_CONFIG_PATH" <<EOF
 entryPoints:
   web:
     address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
   websecure:
     address: ":443"
 
@@ -201,19 +248,25 @@ providers:
   docker:
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false
-
-api:
-  dashboard: true
 EOF
 
-chown -R "$DEFAULT_OWNER:$DEFAULT_OWNER" /srv
-find /srv -type d -exec chmod 755 {} \;
-find /srv -type f -exec chmod 644 {} \;
-chmod -R 775 "$DATA_ROOT"
+# Prava nastavujeme jen na adresare vytvorene skriptem, ne rekurzivne
+# do dat aplikaci (napr. postgres vyzaduje sva vlastni prava).
+for dir in /srv /srv/docker /srv/docker/traefik /srv/docker/portainer "$SHARED_DOCKER_PATH" \
+           "$PROJECTS_ROOT" "$BACKUP_ROOT" "$SCRIPTS_ROOT"; do
+    chown "$DEFAULT_OWNER:$DEFAULT_OWNER" "$dir"
+    chmod 755 "$dir"
+done
+chown "$DEFAULT_OWNER:$DEFAULT_OWNER" "$DATA_ROOT"
+chmod 775 "$DATA_ROOT"
+chmod 644 "$TRAEFIK_CONFIG_PATH"
+chmod 700 "$TRAEFIK_LE_PATH"
 chmod 600 "$ACME_JSON_PATH"
 
-docker network create webproxy || true
+docker network inspect webproxy &>/dev/null || docker network create webproxy
 
+# Pri opakovanem spusteni kontejner znovu vytvorime s aktualni konfiguraci
+docker rm -f traefik &>/dev/null || true
 docker run -d \
   --name traefik \
   --restart always \
@@ -221,16 +274,15 @@ docker run -d \
   -p 443:443 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v "$TRAEFIK_LE_PATH":/letsencrypt \
-  -v "$TRAEFIK_CONFIG_PATH":/traefik.yml \
+  -v "$TRAEFIK_CONFIG_PATH":/etc/traefik/traefik.yml:ro \
   --network webproxy \
-  traefik:v2.10
+  traefik:v3.6
 
 # =========================================================
 # 6. PORTAINER
 # =========================================================
 
-mkdir -p "$PORTAINER_DATA_PATH"
-
+docker rm -f portainer &>/dev/null || true
 docker run -d \
   --name portainer \
   --restart always \
@@ -244,20 +296,21 @@ docker run -d \
   -l "traefik.http.services.portainer.loadbalancer.server.port=9000" \
   portainer/portainer-ce:latest
 
-chown -R "$DEFAULT_OWNER:$DEFAULT_OWNER" "$PORTAINER_DATA_PATH"
-chmod -R 755 "$PORTAINER_DATA_PATH"
-
 # =========================================================
 # 7. SWAP A LOGROTATE
 # =========================================================
 
 if ! swapon --show | grep -q "/swapfile"; then
-    fallocate -l "$SWAP_SIZE" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$(echo $SWAP_SIZE | sed 's/G/*1024/' | bc)
-    chmod 600 /swapfile
-    mkswap /swapfile
+    if [[ ! -f /swapfile ]]; then
+        SWAP_NUM=${SWAP_SIZE%[GM]}
+        if [[ "$SWAP_SIZE" == *G ]]; then SWAP_MB=$((SWAP_NUM * 1024)); else SWAP_MB=$SWAP_NUM; fi
+        fallocate -l "$SWAP_SIZE" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB"
+        chmod 600 /swapfile
+        mkswap /swapfile
+    fi
     swapon /swapfile
-    echo "/swapfile none swap sw 0 0" >> /etc/fstab
 fi
+grep -q "^/swapfile " /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
 
 cat > "$DOCKER_LOGROTATE" << EOF
 /var/lib/docker/containers/*/*.log {
@@ -283,3 +336,8 @@ echo "Portainer: https://$PORTAINER_DOMAIN"
 echo "IP adresa: $(hostname -I | awk '{print $1}')"
 echo "Firewall status:"
 ufw status verbose
+if [[ "$SSH_PORT" != "22" ]]; then
+    echo ""
+    echo "POZOR: SSH nyni bezi na portu $SSH_PORT. Pred odhlasenim over pripojeni v novem okne:"
+    echo "  ssh -p $SSH_PORT root@$(hostname -I | awk '{print $1}')"
+fi

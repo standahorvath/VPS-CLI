@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Skripty spouštíme vždy z adresáře, kde leží start.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
 # Seznam dostupných skriptů
 scripts=(
   "Inicializace serveru (server-init.sh)"
@@ -13,12 +17,12 @@ select opt in "${scripts[@]}"; do
   case $REPLY in
     1)
       echo "Spouštím server-init.sh..."
-      bash server-init.sh
+      bash "$SCRIPT_DIR/server-init.sh"
       break
       ;;
     2)
       echo "Spouštím run-container.sh..."
-      bash run-container.sh
+      bash "$SCRIPT_DIR/run-container.sh"
       break
       ;;
     3)
